@@ -3,7 +3,7 @@ import {port} from './serve';
 const url = `http://localhost:${port}`;
 
 it('shows the homepage, navigates to about, and increases the count', async () => {
-  await page.goto(url + '/');
+  await page.goto(url + '/', { waitUntil: 'networkidle' });
 
   expect(await page.textContent('body')).toContain('Home');
   await page.click('.btn');

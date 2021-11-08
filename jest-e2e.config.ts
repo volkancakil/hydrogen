@@ -4,7 +4,7 @@ import type {Config} from '@jest/types';
 const config: Config.InitialOptions = {
   preset: 'ts-jest',
   testMatch: ['**/playground/**/*.(spec|test).[jt]s?(x)'],
-  testTimeout: process.env.CI ? 30000 : 10000,
+  testTimeout: process.env.CI ? 30000 : 1000000,
   watchPathIgnorePatterns: ['<rootDir>/temp'],
   globalSetup: './scripts/jest-e2e-setup.js',
   globalTeardown: './scripts/jest-e2e-teardown.js',
