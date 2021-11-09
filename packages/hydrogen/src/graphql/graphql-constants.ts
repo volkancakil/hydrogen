@@ -2207,6 +2207,49 @@ fragment Model3DFragment on Model3d {
  *         ...ImageFragment
  *       }
  *     }
+ *     ... on Product {
+ *       handle
+ *       id
+ *       title
+ *       compareAtPriceRange {
+ *         maxVariantPrice {
+ *           ...MoneyFragment
+ *         }
+ *         minVariantPrice {
+ *           ...MoneyFragment
+ *         }
+ *       }
+ *       priceRange {
+ *         maxVariantPrice {
+ *           ...MoneyFragment
+ *         }
+ *         minVariantPrice {
+ *           ...MoneyFragment
+ *         }
+ *       }
+ *       variants (first: 1) {
+ *         edges {
+ *           node {
+ *             id
+ *             title
+ *             availableForSale
+ *             image {
+ *               ...ImageFragment
+ *             }
+ *             priceV2 {
+ *               ...MoneyFragment
+ *             }
+ *             compareAtPriceV2 {
+ *               ...MoneyFragment
+ *             }
+ *             selectedOptions {
+ *               name
+ *               value
+ *             }
+ *           }
+ *         }
+ *       }
+ *     }
  *   }
  * }
  * fragment ImageFragment on Image {
@@ -2236,6 +2279,49 @@ fragment MetafieldFragment on Metafield {
       mediaContentType
       image {
         ...ImageFragment
+      }
+    }
+    ... on Product {
+      handle
+      id
+      title
+      compareAtPriceRange {
+        maxVariantPrice {
+          ...MoneyFragment
+        }
+        minVariantPrice {
+          ...MoneyFragment
+        }
+      }
+      priceRange {
+        maxVariantPrice {
+          ...MoneyFragment
+        }
+        minVariantPrice {
+          ...MoneyFragment
+        }
+      }
+      variants (first: 1) {
+        edges {
+          node {
+            id
+            title
+            availableForSale
+            image {
+              ...ImageFragment
+            }
+            priceV2 {
+              ...MoneyFragment
+            }
+            compareAtPriceV2 {
+              ...MoneyFragment
+            }
+            selectedOptions {
+              name
+              value
+            }
+          }
+        }
       }
     }
   }
@@ -2388,6 +2474,49 @@ export const MoneyFragment: string = `fragment MoneyFragment on MoneyV2 {
  *       mediaContentType
  *       image {
  *         ...ImageFragment
+ *       }
+ *     }
+ *     ... on Product {
+ *       handle
+ *       id
+ *       title
+ *       compareAtPriceRange {
+ *         maxVariantPrice {
+ *           ...MoneyFragment
+ *         }
+ *         minVariantPrice {
+ *           ...MoneyFragment
+ *         }
+ *       }
+ *       priceRange {
+ *         maxVariantPrice {
+ *           ...MoneyFragment
+ *         }
+ *         minVariantPrice {
+ *           ...MoneyFragment
+ *         }
+ *       }
+ *       variants (first: 1) {
+ *         edges {
+ *           node {
+ *             id
+ *             title
+ *             availableForSale
+ *             image {
+ *               ...ImageFragment
+ *             }
+ *             priceV2 {
+ *               ...MoneyFragment
+ *             }
+ *             compareAtPriceV2 {
+ *               ...MoneyFragment
+ *             }
+ *             selectedOptions {
+ *               name
+ *               value
+ *             }
+ *           }
+ *         }
  *       }
  *     }
  *   }
@@ -2696,6 +2825,49 @@ fragment MetafieldFragment on Metafield {
       mediaContentType
       image {
         ...ImageFragment
+      }
+    }
+    ... on Product {
+      handle
+      id
+      title
+      compareAtPriceRange {
+        maxVariantPrice {
+          ...MoneyFragment
+        }
+        minVariantPrice {
+          ...MoneyFragment
+        }
+      }
+      priceRange {
+        maxVariantPrice {
+          ...MoneyFragment
+        }
+        minVariantPrice {
+          ...MoneyFragment
+        }
+      }
+      variants (first: 1) {
+        edges {
+          node {
+            id
+            title
+            availableForSale
+            image {
+              ...ImageFragment
+            }
+            priceV2 {
+              ...MoneyFragment
+            }
+            compareAtPriceV2 {
+              ...MoneyFragment
+            }
+            selectedOptions {
+              name
+              value
+            }
+          }
+        }
       }
     }
   }

@@ -2,6 +2,7 @@
 import faker from 'faker';
 import {Metafield} from '../../graphql/types/types';
 import {ParsedMetafield, Rating, RawMetafield} from '../../types';
+import {getProduct} from './product';
 
 export type MetafieldType =
   | 'single_line_text_field'
@@ -168,6 +169,8 @@ export function getParsedMetafield(
     case 'single_line_text_field':
     case 'multi_line_text_field':
     case 'product_reference':
+      field.value = rawField.value;
+      break;
     case 'page_reference':
     case 'variant_reference':
     case 'file_reference':
