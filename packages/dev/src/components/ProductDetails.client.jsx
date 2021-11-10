@@ -111,6 +111,11 @@ export default function ProductDetails({product}) {
     <>
       <Seo product={product} />
       <Product product={product} initialVariantId={initialVariant.id}>
+        <Product.Metafield
+          keyName="fileref"
+          namespace="my_fields"
+          className="w-full h-screen object-contain"
+        />
         <div className="grid grid-cols-1 md:grid-cols-[2fr,1fr] gap-x-8 my-16">
           <div className="md:hidden mt-5 mb-8">
             <Product.Title
