@@ -1,4 +1,4 @@
-import {Measurement} from '../types';
+import {Measurement} from '../types.js';
 
 const UNIT_MAPPING: Record<string, string> = {
   // Dimension
@@ -22,7 +22,7 @@ const UNIT_MAPPING: Record<string, string> = {
 
 export function getMeasurementAsString(
   measurement: Measurement,
-  locale: string = 'en-us',
+  locale = 'en-us',
   options: Intl.NumberFormatOptions = {}
 ) {
   let measure: {value: number; unit: string} = {
@@ -43,7 +43,7 @@ export function getMeasurementAsString(
 
 export function getMeasurementAsParts(
   measurement: Measurement,
-  locale: string = 'en-us',
+  locale = 'en-us',
   options: Intl.NumberFormatOptions = {}
 ) {
   let measure: {value: number; unit: string} = {

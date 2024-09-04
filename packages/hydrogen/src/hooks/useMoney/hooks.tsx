@@ -1,6 +1,6 @@
 import {useMemo} from 'react';
-import {useShop} from '../../foundation/useShop';
-import {CurrencyCode, MoneyV2} from '../../graphql/types/types';
+import {useLocalization} from '../useLocalization/useLocalization.js';
+import {CurrencyCode, MoneyV2} from '../../storefront-api-types.js';
 
 export type UseMoneyValue = {
   /**
@@ -29,22 +29,36 @@ export type UseMoneyValue = {
   parts: Intl.NumberFormatPart[];
   /**
    * A string returned by `new Intl.NumberFormat` for the amount and currency code,
-   * using the `shopify.config.js` locale.
+   * using the `locale` value in the [`LocalizationProvider` component](https://shopify.dev/api/hydrogen/components/localization/localizationprovider).
    */
   localizedString: string;
   /**
    * The `MoneyV2` object provided as an argument to the hook.
    */
   original: MoneyV2;
+  /**
+   * A string with trailing zeros removed from the fractional part, if any exist. If there are no trailing zeros, then the fractional part remains.
+   * For example, `$640.00` turns into `$640`.
+   * `$640.42` remains `$640.42`.
+   */
+  withoutTrailingZeros: string;
+  /**
+   * A string without currency and without trailing zeros removed from the fractional part, if any exist. If there are no trailing zeros, then the fractional part remains.
+   * For example, `$640.00` turns into `640`.
+   * `$640.42` turns into `640.42`.
+   */
+  withoutTrailingZerosAndCurrency: string;
 };
 
 /**
- * The `useMoney` hook takes a [`MoneyV2` object](/api/storefront/reference/common-objects/moneyv2) and returns a
+ * The `useMoney` hook takes a [MoneyV2 object](https://shopify.dev/api/storefront/reference/common-objects/moneyv2) and returns a
  * default-formatted string of the amount with the correct currency indicator, along with some of the parts provided by
- * [`Intl.NumberFormat`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat).
+ * [Intl.NumberFormat](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat).
  */
 export function useMoney(money: MoneyV2): UseMoneyValue {
-  const {locale} = useShop();
+  const {locale} = useLocalization();
+
+  const amount = parseFloat(money.amount);
 
   const options = useMemo(
     () => ({
@@ -54,51 +68,104 @@ export function useMoney(money: MoneyV2): UseMoneyValue {
     [money.currencyCode]
   );
 
-  const amount = parseFloat(money.amount);
+  const defaultFormatter = useLazyFormatter(locale, options);
 
-  const value = useMemo(
-    () => new Intl.NumberFormat(locale, options).format(amount),
-    [amount, locale, options]
-  );
-
-  const baseParts = new Intl.NumberFormat(locale, options).formatToParts(
-    amount
-  );
-  const nameParts = new Intl.NumberFormat(locale, {
+  const nameFormatter = useLazyFormatter(locale, {
     ...options,
     currencyDisplay: 'name',
-  }).formatToParts(amount);
-  const narrowParts = new Intl.NumberFormat(locale, {
+  });
+
+  const narrowSymbolFormatter = useLazyFormatter(locale, {
     ...options,
     currencyDisplay: 'narrowSymbol',
-  }).formatToParts(amount);
+  });
 
-  const moneyValue = useMemo(
+  const withoutTrailingZerosFormatter = useLazyFormatter(locale, {
+    ...options,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  });
+
+  const withoutCurrencyFormatter = useLazyFormatter(locale);
+
+  const withoutTrailingZerosOrCurrencyFormatter = useLazyFormatter(locale, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  });
+
+  const isPartCurrency = (part: Intl.NumberFormatPart) =>
+    part.type === 'currency';
+
+  // By wrapping these properties in functions, we only
+  // create formatters if they are going to be used.
+  const lazyFormatters = useMemo(
     () => ({
-      currencyCode: money.currencyCode,
-      currencyName:
-        nameParts.find((part) => part.type === 'currency')?.value ?? // e.g. "US dollars"
-        money.currencyCode,
-      currencySymbol:
-        baseParts.find((part) => part.type === 'currency')?.value ?? // e.g. "USD"
-        money.currencyCode,
-      currencyNarrowSymbol:
-        narrowParts.find((part) => part.type === 'currency')?.value ?? // e.g. "$"
-        '',
-      parts: baseParts,
-      localizedString: value,
-      amount: baseParts
-        .filter((part) =>
-          ['decimal', 'fraction', 'group', 'integer', 'literal'].includes(
-            part.type
+      original: () => money,
+      currencyCode: () => money.currencyCode,
+
+      localizedString: () => defaultFormatter().format(amount),
+
+      parts: () => defaultFormatter().formatToParts(amount),
+
+      withoutTrailingZeros: () =>
+        amount % 1 === 0
+          ? withoutTrailingZerosFormatter().format(amount)
+          : defaultFormatter().format(amount),
+
+      withoutTrailingZerosAndCurrency: () =>
+        amount % 1 === 0
+          ? withoutTrailingZerosOrCurrencyFormatter().format(amount)
+          : withoutCurrencyFormatter().format(amount),
+
+      currencyName: () =>
+        nameFormatter().formatToParts(amount).find(isPartCurrency)?.value ??
+        money.currencyCode, // e.g. "US dollars"
+
+      currencySymbol: () =>
+        defaultFormatter().formatToParts(amount).find(isPartCurrency)?.value ??
+        money.currencyCode, // e.g. "USD"
+
+      currencyNarrowSymbol: () =>
+        narrowSymbolFormatter().formatToParts(amount).find(isPartCurrency)
+          ?.value ?? '', // e.g. "$"
+
+      amount: () =>
+        defaultFormatter()
+          .formatToParts(amount)
+          .filter((part) =>
+            ['decimal', 'fraction', 'group', 'integer', 'literal'].includes(
+              part.type
+            )
           )
-        )
-        .map((part) => part.value)
-        .join(''),
-      original: money,
+          .map((part) => part.value)
+          .join(''),
     }),
-    [baseParts, money, nameParts, narrowParts, value]
+    [
+      money,
+      amount,
+      nameFormatter,
+      defaultFormatter,
+      narrowSymbolFormatter,
+      withoutCurrencyFormatter,
+      withoutTrailingZerosFormatter,
+      withoutTrailingZerosOrCurrencyFormatter,
+    ]
   );
 
-  return moneyValue;
+  // Call functions automatically when the properties are accessed
+  // to keep these functions as an implementation detail.
+  return useMemo(
+    () =>
+      new Proxy(lazyFormatters as unknown as UseMoneyValue, {
+        get: (target, key) => Reflect.get(target, key)?.call(null),
+      }),
+    [lazyFormatters]
+  );
+}
+
+function useLazyFormatter(locale: string, options?: Intl.NumberFormatOptions) {
+  return useMemo(() => {
+    let memoized: Intl.NumberFormat;
+    return () => (memoized ??= new Intl.NumberFormat(locale, options));
+  }, [locale, options]);
 }

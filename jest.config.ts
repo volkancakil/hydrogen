@@ -8,19 +8,20 @@ const config: Config.InitialOptions = {
     '!**/*/dist/**/*',
     '!**/*/fixtures/**/*',
   ],
-  testPathIgnorePatterns: ['<rootDir>/packages/playground/*'],
-  testTimeout: process.env.CI ? 30000 : 10000,
+  testPathIgnorePatterns: [
+    '<rootDir>/packages/playground/*',
+    '<rootDir>/examples/*',
+    '<rootDir>/templates/*',
+  ],
+  testTimeout: process.env.CI ? 45000 : 10000,
   watchPathIgnorePatterns: ['<rootDir>/temp', 'fixtures'],
   setupFilesAfterEnv: ['<rootDir>/jest-setup.ts'],
   globals: {
-    __DEV__: true,
+    __HYDROGEN_DEV__: true,
+    __HYDROGEN_TEST__: true,
+    __HYDROGEN_CACHE_ID__: '"__QUERY_CACHE_ID__"',
     'ts-jest': {
-      tsconfig: {
-        jsx: 'react',
-        esModuleInterop: true,
-        lib: ['ESNext', 'DOM'],
-        target: 'es6',
-      },
+      tsconfig: './packages/hydrogen/tsconfig.json',
     },
   },
   collectCoverageFrom: [
@@ -32,6 +33,10 @@ const config: Config.InitialOptions = {
   ],
   coverageDirectory: 'coverage',
   coverageReporters: ['html-spa', 'text-summary'],
+  moduleNameMapper: {
+    // captures the module name with '.js', and removes the '.js' part so that the module resolver can find the '.ts' file
+    '^(\\.{1,2}/.*)\\.js$': '$1',
+  },
 };
 
 export default config;

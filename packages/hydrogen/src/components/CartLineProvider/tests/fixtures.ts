@@ -1,4 +1,5 @@
-import {CurrencyCode} from '../../../graphql/types/types';
+import {CurrencyCode} from '../../../storefront-api-types.js';
+import {CartFragmentFragment} from '../../CartProvider/graphql/CartFragment.js';
 
 export const CART_LINE = {
   attributes: [{key: 'color', value: 'red'}],
@@ -19,4 +20,20 @@ export const CART_LINE = {
     selectedOptions: [{name: 'size', value: 'large'}],
     title: 'Product Name - Large',
   },
+  cost: {
+    totalAmount: {
+      amount: '123',
+      currencyCode: CurrencyCode.Usd,
+    },
+    compareAtAmount: {
+      amount: '125',
+      currencyCode: CurrencyCode.Usd,
+    },
+  },
 };
+
+export function getCartLineMock(
+  options?: Partial<CartFragmentFragment['lines']['edges'][0]['node']>
+) {
+  return {...CART_LINE, ...options};
+}

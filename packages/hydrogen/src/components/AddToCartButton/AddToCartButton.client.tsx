@@ -1,49 +1,51 @@
-import React, {ReactNode, useEffect, useState} from 'react';
-import {
-  useCartLinesAddCallback,
-  useCart,
-  useCartCreateCallback,
-} from '../CartProvider';
-import {Props} from '../types';
+import React, {useCallback, useEffect, useState} from 'react';
+import {useCart} from '../CartProvider/index.js';
+import {useProductOptions} from '../../hooks/useProductOptions/index.js';
+import {BaseButton, BaseButtonProps} from '../BaseButton/index.js';
 
-export interface AddToCartButtonProps {
+interface AddToCartButtonProps {
   /** An array of cart line attributes that belong to the item being added to the cart. */
   attributes?: {
     key: string;
     value: string;
   }[];
   /** The ID of the variant. */
-  variantId: string;
+  variantId?: string | null;
   /** The item quantity. */
   quantity?: number;
-  /** Any ReactNode elements. */
-  children: ReactNode;
   /** The text that is announced by the screen reader when the item is being added to the cart. Used for accessibility purposes only and not displayed on the page. */
   accessibleAddingToCartLabel?: string;
+  /** The selling plan ID of the subscription variant */
+  sellingPlanId?: string;
 }
-
-type PropsWeControl = 'onClick';
 
 /**
  * The `AddToCartButton` component renders a button that adds an item to the cart when pressed.
  * It must be a descendent of the `CartProvider` component.
  */
-export function AddToCartButton<TTag extends React.ElementType = 'button'>(
-  props: Props<TTag, PropsWeControl> & AddToCartButtonProps
+export function AddToCartButton<AsType extends React.ElementType = 'button'>(
+  props: AddToCartButtonProps & BaseButtonProps<AsType>
 ) {
   const [addingItem, setAddingItem] = useState<boolean>(false);
   const {
-    variantId,
+    variantId: explicitVariantId,
     quantity = 1,
     attributes,
+    sellingPlanId,
+    onClick,
     children,
-    onAdd,
     accessibleAddingToCartLabel,
     ...passthroughProps
   } = props;
-  const {status, id} = useCart();
-  const createCart = useCartCreateCallback();
-  const addLines = useCartLinesAddCallback();
+  const {status, linesAdd} = useCart();
+  const {selectedVariant} = useProductOptions();
+  const variantId = explicitVariantId ?? selectedVariant?.id ?? '';
+  const disabled =
+    explicitVariantId === null ||
+    variantId === '' ||
+    selectedVariant === null ||
+    addingItem ||
+    passthroughProps.disabled;
 
   useEffect(() => {
     if (addingItem && status === 'idle') {
@@ -51,36 +53,28 @@ export function AddToCartButton<TTag extends React.ElementType = 'button'>(
     }
   }, [status, addingItem]);
 
+  const handleAddItem = useCallback(() => {
+    setAddingItem(true);
+    linesAdd([
+      {
+        quantity,
+        merchandiseId: variantId,
+        attributes,
+        sellingPlanId,
+      },
+    ]);
+  }, [linesAdd, quantity, variantId, attributes, sellingPlanId]);
+
   return (
     <>
-      <button
+      <BaseButton
         {...passthroughProps}
-        disabled={addingItem || passthroughProps.disabled}
-        onClick={() => {
-          setAddingItem(true);
-          if (!id) {
-            createCart({
-              lines: [
-                {
-                  quantity: quantity,
-                  merchandiseId: variantId,
-                  attributes: attributes,
-                },
-              ],
-            });
-          } else {
-            addLines([
-              {
-                quantity: quantity,
-                merchandiseId: variantId,
-                attributes: attributes,
-              },
-            ]);
-          }
-        }}
+        disabled={disabled}
+        onClick={onClick}
+        defaultOnClick={handleAddItem}
       >
         {children}
-      </button>
+      </BaseButton>
       {accessibleAddingToCartLabel ? (
         <p
           style={{

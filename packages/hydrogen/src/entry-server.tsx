@@ -1,481 +1,1013 @@
-import React, {ComponentType, JSXElementConstructor} from 'react';
+import React, {Suspense} from 'react';
 import {
-  renderToReadableStream,
-  pipeToNodeWritable,
-  // @ts-ignore
-} from 'react-dom/unstable-fizz';
-import {renderToString} from 'react-dom/server';
-import {getErrorMarkup} from './utilities/error';
-import ssrPrepass from 'react-ssr-prepass';
-import {StaticRouter} from 'react-router-dom';
-import type {ServerHandler} from './types';
-import {HydrationContext} from './framework/Hydration/HydrationContext.server';
-import type {ReactQueryHydrationContext} from './foundation/ShopifyProvider/types';
-import {generateWireSyntaxFromRenderedHtml} from './framework/Hydration/wire.server';
-import {FilledContext, HelmetProvider} from 'react-helmet-async';
-import {Html} from './framework/Hydration/Html';
-import {HydrationWriter} from './framework/Hydration/writer.server';
-import {Renderer, Hydrator, Streamer} from './types';
-import {ServerComponentResponse} from './framework/Hydration/ServerComponentResponse.server';
-import {ServerComponentRequest} from './framework/Hydration/ServerComponentRequest.server';
-import {dehydrate} from 'react-query/hydration';
-import {getCacheControlHeader} from './framework/cache';
+  Logger,
+  logServerResponse,
+  logCacheControlHeaders,
+  logQueryTimings,
+  getLoggerWithContext,
+  setLogger,
+  type RenderType,
+} from './utilities/log/index.js';
+import {getErrorMarkup} from './utilities/error.js';
+import type {
+  AssembleHtmlParams,
+  RunSsrParams,
+  RunRscParams,
+  ResolvedHydrogenConfig,
+  ResolvedHydrogenRoutes,
+  RequestHandler,
+} from './types.js';
+import type {RequestHandlerOptions} from './shared-types.js';
+import {Html, applyHtmlHead} from './foundation/Html/Html.js';
+import {HydrogenResponse} from './foundation/HydrogenResponse/HydrogenResponse.server.js';
+import {HydrogenRequest} from './foundation/HydrogenRequest/HydrogenRequest.server.js';
+import {
+  preloadRequestCacheData,
+  ServerRequestProvider,
+} from './foundation/ServerRequestProvider/index.js';
 import type {ServerResponse} from 'http';
+import {
+  getApiRouteFromURL,
+  renderApiRoute,
+  getApiRoutes,
+} from './utilities/apiRoutes.js';
+import {ServerPropsProvider} from './foundation/ServerPropsProvider/index.js';
+import {isBotUA} from './utilities/bot-ua.js';
+import {getCache, setCache} from './foundation/runtime.js';
+import {
+  ssrRenderToPipeableStream,
+  ssrRenderToReadableStream,
+  rscRenderToReadableStream,
+  createFromReadableStream,
+  bufferReadableStream,
+} from './streaming.server.js';
+import {getTemplate} from './utilities/template.js';
+import {Analytics} from './foundation/Analytics/Analytics.server.js';
+import {DevTools} from './foundation/DevTools/DevTools.server.js';
+import {getSyncSessionApi} from './foundation/session/session.js';
+import {parseState} from './utilities/parse.js';
+import {htmlEncode} from './utilities/index.js';
+import {generateUUID} from './utilities/random.js';
+import {splitCookiesString} from 'set-cookie-parser';
+import {
+  deleteItemFromCache,
+  getItemFromCache,
+  isStale,
+  setItemInCache,
+} from './foundation/Cache/cache.js';
+import {CacheShort, NO_STORE} from './foundation/Cache/strategies/index.js';
+import {getBuiltInRoute} from './foundation/BuiltInRoutes/BuiltInRoutes.js';
+import {FORM_REDIRECT_COOKIE} from './constants.js';
 
-/**
- * react-dom/unstable-fizz provides different entrypoints based on runtime:
- * - `renderToReadableStream` for "browser" (aka worker)
- * - `pipeToNodeWritable` for node.js
- */
-const isWorker = Boolean(renderToReadableStream);
+// Importing 'stream' directly breaks Vite resolve
+// when building for workers, even though this code
+// does not run in a worker. Looks like tree-shaking
+// kicks in after the import analysis/bundle.
+// @ts-ignore
+import stream from 'virtual__stream';
+import type {PassThrough as PassThroughType} from 'stream';
+const PassThrough = stream.PassThrough as typeof PassThroughType;
 
-/**
- * If a query is taking too long, or something else went wrong,
- * send back a response containing the Suspense fallback and rely
- * on the client to hydrate and build the React tree.
- */
-const STREAM_ABORT_TIMEOUT_MS = 3000;
+declare global {
+  // This is provided by a Vite plugin
+  // and will trigger tree-shaking.
+  // eslint-disable-next-line no-var
+  var __HYDROGEN_WORKER__: boolean;
+}
 
-const renderHydrogen: ServerHandler = (App, hook) => {
-  /**
-   * The render function is responsible for turning the provided `App` into an HTML string,
-   * and returning any initial state that needs to be hydrated into the client version of the app.
-   * NOTE: This is currently only used for SEO bots or Worker runtime (where Stream is not yet supported).
-   */
-  const render: Renderer = async function (
-    url,
-    {context, request, isReactHydrationRequest, dev}
-  ) {
-    const state = isReactHydrationRequest
-      ? JSON.parse(url.searchParams?.get('state') ?? '{}')
-      : {pathname: url.pathname, search: url.search};
+const DOCTYPE = '<!DOCTYPE html>';
+const CONTENT_TYPE = 'Content-Type';
+const HTML_CONTENT_TYPE = 'text/html; charset=UTF-8';
 
-    const {ReactApp, helmetContext, componentResponse} = buildReactApp({
-      App,
-      state,
-      context,
-      request,
-      dev,
-    });
+export const renderHydrogen = (App: any) => {
+  const handleRequest: RequestHandler = async function (rawRequest, options) {
+    const {cache, context, buyerIpHeader, headers} = options;
 
-    const body = await renderApp(ReactApp, state, isReactHydrationRequest);
+    const request = new HydrogenRequest(rawRequest);
+    const url = new URL(request.url);
 
-    if (componentResponse.customBody) {
-      return {body: await componentResponse.customBody, url, componentResponse};
+    let sessionApi = options.sessionApi;
+
+    const {default: importedConfig} = await import(
+      // @ts-ignore
+      'virtual__hydrogen.config.ts'
+    );
+
+    const inlineHydrogenConfig =
+      typeof importedConfig === 'function' ? importedConfig() : importedConfig;
+
+    const {default: hydrogenRoutes} = await import(
+      // @ts-ignore
+      'virtual__hydrogen-routes.server.jsx'
+    );
+
+    const hydrogenConfig: ResolvedHydrogenConfig = {
+      ...inlineHydrogenConfig,
+      routes: hydrogenRoutes,
+    };
+
+    request.ctx.hydrogenConfig = hydrogenConfig;
+    request.ctx.buyerIpHeader = buyerIpHeader;
+
+    const platformRequestID = request.headers.get('request-id');
+    if (platformRequestID) {
+      request.ctx.requestGroupID = platformRequestID;
+    } else {
+      request.ctx.requestGroupID = generateUUID();
     }
 
-    let params = {url, ...extractHeadElements(helmetContext)};
+    setLogger(hydrogenConfig.logger);
+    const log = getLoggerWithContext(request);
+
+    const responseHeaders = new Headers(headers);
+    responseHeaders.set(
+      'Custom-Storefront-Request-Group-ID',
+      request.ctx.requestGroupID
+    );
+
+    const response = new HydrogenResponse(request.url, null, {
+      headers: responseHeaders,
+    });
+
+    if (request.cookies.get(FORM_REDIRECT_COOKIE)) {
+      response.headers.set('SET-COOKIE', `${FORM_REDIRECT_COOKIE}=`);
+      response.doNotStream();
+    }
+
+    if (hydrogenConfig.poweredByHeader ?? true) {
+      // If undefined in the config, then always show the header
+      response.headers.set('powered-by', 'Shopify, Hydrogen');
+    }
+
+    sessionApi ??= hydrogenConfig.session?.(log);
+
+    request.ctx.session = getSyncSessionApi(request, response, log, sessionApi);
 
     /**
-     * We allow the developer to "hook" into this process and mutate the params.
+     * Inject the cache & context into the module loader so we can pull it out for subrequests.
      */
-    if (hook) {
-      params = hook(params) || params;
+    request.ctx.runtime = context;
+
+    setCache(cache);
+
+    const builtInRouteResource = getBuiltInRoute(url);
+
+    if (builtInRouteResource) {
+      const apiResponse = await renderApiRoute(
+        request,
+        {
+          resource: builtInRouteResource,
+          params: {},
+          hasServerComponent: false,
+        },
+        hydrogenConfig,
+        {
+          session: sessionApi,
+          suppressLog: true,
+        }
+      );
+
+      return apiResponse instanceof Request
+        ? handleRequest(apiResponse, {
+            ...options,
+            sessionApi,
+            headers: apiResponse.headers,
+          })
+        : apiResponse;
     }
 
-    return {body, componentResponse, ...params};
-  };
+    // Check if we have cached response
+    if (cache) {
+      const cachedResponse = await getItemFromCache(request.cacheKey());
+      if (cachedResponse) {
+        if (isStale(request, cachedResponse)) {
+          const lockCacheKey = request.cacheKey(true);
+          const staleWhileRevalidatePromise = getItemFromCache(
+            lockCacheKey
+          ).then(async (lockExists: Response | undefined) => {
+            if (lockExists) return;
+            try {
+              // Don't stream when creating a response for cache
+              response.doNotStream();
 
-  /**
-   * Stream a response to the client. NOTE: This omits custom `<head>`
-   * information, so this method should not be used by crawlers.
-   */
-  const stream: Streamer = function (
-    url: URL,
-    {context, request, response, template, dev}
-  ) {
-    const state = {pathname: url.pathname, search: url.search};
+              await setItemInCache(
+                lockCacheKey,
+                new Response(null),
+                CacheShort({
+                  maxAge: 10,
+                })
+              );
 
-    const {ReactApp, componentResponse} = buildReactApp({
-      App,
-      state,
-      context,
-      request,
-      dev,
-    });
+              await processRequest(
+                handleRequest,
+                App,
+                url,
+                request,
+                sessionApi,
+                options,
+                response,
+                hydrogenConfig,
+                true
+              );
 
-    response.socket!.on('error', (error: any) => {
-      console.error('Fatal', error);
-    });
-
-    let didError: Error | undefined;
-
-    const head = template.match(/<head>(.+?)<\/head>/s)![1];
-
-    const {startWriting, abort} = pipeToNodeWritable(
-      <Html head={head}>
-        <ReactApp {...state} />
-      </Html>,
-      response,
-      {
-        onReadyToStream() {
-          /**
-           * TODO: This assumes `response.cache()` has been called _before_ any
-           * queries which might be caught behind Suspense. Clarify this or add
-           * additional checks downstream?
-           */
-          response.setHeader(
-            getCacheControlHeader({dev}),
-            componentResponse.cacheControlHeader
-          );
-
-          writeHeadToServerResponse(response, componentResponse, didError);
-          if (isRedirect(response)) {
-            // Return redirects early without further rendering/streaming
-            return response.end();
-          }
-
-          if (!componentResponse.canStream()) return;
-
-          startWritingHtmlToServerResponse(
-            response,
-            startWriting,
-            dev ? didError : undefined
-          );
-        },
-        onCompleteAll() {
-          if (componentResponse.canStream() || response.writableEnded) return;
-
-          writeHeadToServerResponse(response, componentResponse, didError);
-          if (isRedirect(response)) {
-            // Redirects found after any async code
-            return response.end();
-          }
-
-          if (componentResponse.customBody) {
-            if (componentResponse.customBody instanceof Promise) {
-              componentResponse.customBody.then((body) => response.end(body));
-            } else {
-              response.end(componentResponse.customBody);
+              response.markAsSent();
+            } catch (e: any) {
+              log.error('Cache revalidate error', e);
             }
-          } else {
-            startWritingHtmlToServerResponse(
-              response,
-              startWriting,
-              dev ? didError : undefined
-            );
-          }
-        },
-        onError(error: any) {
-          didError = error;
+          });
 
-          if (dev && response.headersSent) {
-            // Calling write would flush headers automatically.
-            // Delay this error until headers are properly sent.
-            response.write(getErrorMarkup(error));
-          }
+          // Asynchronously wait for it in workers
+          request.ctx.runtime?.waitUntil?.(staleWhileRevalidatePromise);
+        }
 
-          console.error(error);
-        },
+        return cachedResponse;
       }
-    );
+    }
 
-    setTimeout(abort, STREAM_ABORT_TIMEOUT_MS);
-  };
-
-  /**
-   * Stream a hydration response to the client.
-   */
-  const hydrate: Hydrator = function (
-    url: URL,
-    {context, request, response, dev}
-  ) {
-    const state = JSON.parse(url.searchParams.get('state') || '{}');
-
-    const {ReactApp, componentResponse} = buildReactApp({
+    const result = await processRequest(
+      handleRequest,
       App,
-      state,
-      context,
+      url,
       request,
-      dev,
-    });
-
-    response.socket!.on('error', (error: any) => {
-      console.error('Fatal', error);
-    });
-
-    let didError: Error | undefined;
-
-    const writer = new HydrationWriter();
-
-    const {startWriting, abort} = pipeToNodeWritable(
-      <HydrationContext.Provider value={true}>
-        <ReactApp {...state} />
-      </HydrationContext.Provider>,
-      writer,
-      {
-        /**
-         * When hydrating, we have to wait until `onCompleteAll` to avoid having
-         * `template` and `script` tags inserted and rendered as part of the hydration response.
-         */
-        onCompleteAll() {
-          // Tell React to start writing to the writer
-          startWriting();
-
-          // Tell React that the writer is ready to drain, which sometimes results in a last "chunk" being written.
-          writer.drain();
-
-          response.statusCode = didError ? 500 : 200;
-          response.setHeader(
-            getCacheControlHeader({dev}),
-            componentResponse.cacheControlHeader
-          );
-          response.end(generateWireSyntaxFromRenderedHtml(writer.toString()));
-        },
-        onError(error: any) {
-          didError = error;
-          console.error(error);
-        },
-      }
+      sessionApi,
+      options,
+      response,
+      hydrogenConfig
     );
 
-    setTimeout(abort, STREAM_ABORT_TIMEOUT_MS);
+    response.markAsSent();
+    return result;
   };
 
-  return {
-    render,
-    stream,
-    hydrate,
-  };
+  if (__HYDROGEN_WORKER__) return handleRequest;
+
+  return ((rawRequest, options) =>
+    handleFetchResponseInNode(
+      handleRequest(rawRequest, options),
+      options.streamableResponse
+    )) as RequestHandler;
 };
 
-function buildReactApp({
-  App,
-  state,
-  context,
-  request,
-  dev,
-}: {
-  App: ComponentType;
-  state: any;
-  context: any;
-  request: ServerComponentRequest;
-  dev: boolean | undefined;
-}) {
-  const helmetContext = {} as FilledContext;
-  const componentResponse = new ServerComponentResponse();
-
-  const ReactApp = (props: any) => (
-    <StaticRouter
-      location={{pathname: state.pathname, search: state.search}}
-      context={context}
-    >
-      <HelmetProvider context={helmetContext}>
-        <App {...props} request={request} response={componentResponse} />
-      </HelmetProvider>
-    </StaticRouter>
-  );
-
-  return {helmetContext, ReactApp, componentResponse};
-}
-
-function extractHeadElements(helmetContext: FilledContext) {
-  const {helmet} = helmetContext;
-
-  return {
-    base: helmet.base.toString(),
-    bodyAttributes: helmet.bodyAttributes.toString(),
-    htmlAttributes: helmet.htmlAttributes.toString(),
-    link: helmet.link.toString(),
-    meta: helmet.meta.toString(),
-    noscript: helmet.noscript.toString(),
-    script: helmet.script.toString(),
-    style: helmet.style.toString(),
-    title: helmet.title.toString(),
-  };
-}
-
-function supportsReadableStream() {
-  try {
-    new ReadableStream();
-    return true;
-  } catch (_e) {
-    return false;
-  }
-}
-
-async function renderApp(
-  ReactApp: JSXElementConstructor<any>,
-  state: any,
-  isReactHydrationRequest?: boolean
+async function processRequest(
+  handleRequest: RequestHandler,
+  App: any,
+  url: URL,
+  request: HydrogenRequest,
+  sessionApi: any,
+  options: RequestHandlerOptions,
+  response: HydrogenResponse,
+  hydrogenConfig: ResolvedHydrogenConfig,
+  revalidate = false
 ) {
-  /**
-   * Temporary workaround until all Worker runtimes support ReadableStream
-   */
-  if (isWorker && !supportsReadableStream()) {
-    return renderAppFromStringWithPrepass(
-      ReactApp,
-      state,
-      isReactHydrationRequest
-    );
-  }
+  const {dev, nonce, indexTemplate, streamableResponse: nodeResponse} = options;
 
-  const app = isReactHydrationRequest ? (
-    <HydrationContext.Provider value={true}>
-      <ReactApp {...state} />
-    </HydrationContext.Provider>
-  ) : (
-    <ReactApp {...state} />
-  );
+  const log = getLoggerWithContext(request);
+  const isRSCRequest = request.isRscRequest();
+  const apiRoute = !isRSCRequest && getApiRoute(url, hydrogenConfig.routes);
 
-  return renderAppFromBufferedStream(app, isReactHydrationRequest);
-}
-
-function renderAppFromBufferedStream(
-  app: JSX.Element,
-  isReactHydrationRequest?: boolean
-) {
-  return new Promise<string>((resolve, reject) => {
-    if (isWorker) {
-      let isComplete = false;
-
-      const stream = renderToReadableStream(app, {
-        onCompleteAll() {
-          isComplete = true;
-        },
-        onError(error: any) {
-          console.error(error);
-          reject(error);
-        },
-      }) as ReadableStream;
-
-      /**
-       * We want to wait until `onCompleteAll` has been called before fetching the
-       * stream body. Otherwise, React 18's streaming JS script/template tags
-       * will be included in the output and cause issues when loading
-       * the Client Components in the browser.
-       */
-      async function checkForResults() {
-        if (!isComplete) {
-          setTimeout(checkForResults, 100);
-          return;
-        }
-
-        /**
-         * Use the stream to build a `Response`, and fetch the body from the response
-         * to resolve and be processed by the rest of the pipeline.
-         */
-        const res = new Response(stream);
-        if (isReactHydrationRequest) {
-          resolve(generateWireSyntaxFromRenderedHtml(await res.text()));
-        } else {
-          resolve(await res.text());
-        }
+  // The API Route might have a default export, making it also a server component
+  // If it does, only render the API route if the request method is GET
+  if (apiRoute && (!apiRoute.hasServerComponent || request.method !== 'GET')) {
+    const apiResponse = await renderApiRoute(
+      request,
+      apiRoute,
+      hydrogenConfig,
+      {
+        session: sessionApi,
       }
+    );
 
-      checkForResults();
-    } else {
-      const writer = new HydrationWriter();
+    return apiResponse instanceof Request
+      ? handleRequest(apiResponse, {
+          ...options,
+          sessionApi,
+          headers: apiResponse.headers,
+        })
+      : apiResponse;
+  }
 
-      const {startWriting} = pipeToNodeWritable(app, writer, {
-        /**
-         * When hydrating, we have to wait until `onCompleteAll` to avoid having
-         * `template` and `script` tags inserted and rendered as part of the hydration response.
-         */
-        onCompleteAll() {
-          // Tell React to start writing to the writer
-          startWriting();
+  const state = parseState(url);
 
-          // Tell React that the writer is ready to drain, which sometimes results in a last "chunk" being written.
-          writer.drain();
+  if (!state) {
+    postRequestTasks(
+      isRSCRequest ? 'rsc' : 'ssr',
+      400,
+      request,
+      response,
+      true
+    );
 
-          if (isReactHydrationRequest) {
-            resolve(generateWireSyntaxFromRenderedHtml(writer.toString()));
-          } else {
-            resolve(writer.toString());
-          }
-        },
-        onError(error: any) {
-          console.error(error);
-          reject(error);
-        },
-      });
+    return new Response(`Invalid RSC state`, {status: 400});
+  }
+
+  const rsc = runRSC({App, state, log, request, response});
+
+  if (isRSCRequest) {
+    const buffered = await bufferReadableStream(rsc.readable.getReader());
+    const rscDidError = !!rsc.didError();
+    postRequestTasks(
+      'rsc',
+      rscDidError ? 500 : 200,
+      request,
+      response,
+      rscDidError
+    );
+
+    if (!rscDidError) {
+      response.headers.set('cache-control', response.cacheControlHeader);
+      cacheResponse(response, request, [buffered], revalidate);
     }
+
+    return new Response(buffered, {
+      headers: response.headers,
+    });
+  }
+
+  if (
+    request.headers.get('oxygen-do-not-stream-response') === 'true' ||
+    isBotUA(url, request.headers.get('user-agent'))
+  ) {
+    response.doNotStream();
+  }
+
+  return runSSR({
+    log,
+    dev,
+    rsc,
+    nonce,
+    state,
+    request,
+    response,
+    nodeResponse,
+    revalidate,
+    template: await getTemplate(indexTemplate, url),
   });
 }
 
-/**
- * If we can't render a "blocking" response by buffering React's SSR
- * streaming functionality (likely due to lack of support for a primitive
- * in the runtime), we fall back to using `renderToString`. By default,
- * `renderToString` stops at Suspense boundaries and will not
- * keep trying them until they resolve. This means have to
- * use ssr-prepass to fetch all the queries once, store
- * the results in a context object, and re-render.
- */
-async function renderAppFromStringWithPrepass(
-  ReactApp: JSXElementConstructor<any>,
-  state: any,
-  isReactHydrationRequest?: boolean
-) {
-  const hydrationContext: ReactQueryHydrationContext = {};
+function getApiRoute(url: URL, routes: ResolvedHydrogenRoutes) {
+  const apiRoutes = getApiRoutes(routes);
+  return getApiRouteFromURL(url, apiRoutes);
+}
 
-  const app = isReactHydrationRequest ? (
-    <HydrationContext.Provider value={true}>
-      <ReactApp hydrationContext={hydrationContext} {...state} />
-    </HydrationContext.Provider>
-  ) : (
-    <ReactApp hydrationContext={hydrationContext} {...state} />
-  );
+function assembleHtml({
+  ssrHtml,
+  rscPayload,
+  request,
+  template,
+}: AssembleHtmlParams) {
+  let html = applyHtmlHead(ssrHtml, request.ctx.head, template);
 
-  await ssrPrepass(app);
-
-  /**
-   * Dehydrate all the queries made during the prepass above and store
-   * them in the context object to be used for the next render pass.
-   * This prevents rendering the Suspense fallback in `renderToString`.
-   */
-  if (hydrationContext.queryClient) {
-    hydrationContext.dehydratedState = dehydrate(hydrationContext.queryClient);
+  if (rscPayload) {
+    html = html.replace(
+      '</body>',
+      // This must be a function to avoid replacing
+      // special patterns like `$1` in `String.replace`.
+      () => flightContainer(rscPayload) + '</body>'
+    );
   }
 
-  const body = renderToString(app);
+  return html;
+}
 
-  return isReactHydrationRequest
-    ? generateWireSyntaxFromRenderedHtml(body)
-    : body;
+/**
+ * Run the SSR/Fizz part of the App. If streaming is disabled,
+ * this buffers the output and applies SEO enhancements.
+ */
+async function runSSR({
+  rsc,
+  state,
+  request,
+  response,
+  nodeResponse,
+  nonce,
+  dev,
+  log,
+  revalidate,
+  template: {
+    raw: template,
+    noScriptTemplate,
+    bootstrapModules,
+    bootstrapScripts,
+    linkHeader,
+  },
+}: RunSsrParams) {
+  let ssrDidError: Error | undefined;
+  const didError = () => rsc.didError() ?? ssrDidError;
+
+  const [rscReadableForFizz, rscReadableForFlight] = rsc.readable.tee();
+  const rscResponse = createFromReadableStream(rscReadableForFizz);
+  const RscConsumer = () => rscResponse.readRoot();
+
+  const AppSSR = (
+    <Html
+      template={response.canStream() ? noScriptTemplate : template}
+      hydrogenConfig={request.ctx.hydrogenConfig!}
+    >
+      <ServerRequestProvider request={request}>
+        <ServerPropsProvider
+          initialServerProps={state as any}
+          setServerPropsForRsc={() => {}}
+          setRscResponseFromApiRoute={() => {}}
+        >
+          <Suspense fallback={null}>
+            <RscConsumer />
+          </Suspense>
+        </ServerPropsProvider>
+      </ServerRequestProvider>
+    </Html>
+  );
+
+  if (linkHeader) {
+    const existingLinkHeader = response.headers.get('Link');
+    response.headers.set(
+      'Link',
+      existingLinkHeader ? existingLinkHeader + ', ' + linkHeader : linkHeader
+    );
+  }
+
+  log.trace('start ssr');
+
+  const rscReadable = response.canStream()
+    ? new ReadableStream({
+        start(controller) {
+          log.trace('rsc start chunks');
+          const encoder = new TextEncoder();
+          bufferReadableStream(rscReadableForFlight.getReader(), (chunk) => {
+            const metaTag = flightContainer(chunk);
+            controller.enqueue(encoder.encode(metaTag));
+          }).then(() => {
+            log.trace('rsc finish chunks');
+            return controller.close();
+          });
+        },
+      })
+    : rscReadableForFlight;
+
+  if (__HYDROGEN_WORKER__) {
+    const encoder = new TextEncoder();
+    const transform = new TransformStream();
+    const writable = transform.writable.getWriter();
+    const responseOptions = {} as ResponseOptions;
+    const savedChunks = tagOnWrite(writable);
+
+    let ssrReadable: Awaited<ReturnType<typeof ssrRenderToReadableStream>>;
+
+    try {
+      ssrReadable = await ssrRenderToReadableStream(AppSSR, {
+        nonce,
+        bootstrapScripts,
+        bootstrapModules,
+        onError(error) {
+          ssrDidError = error as Error;
+
+          if (dev && !writable.closed && !!responseOptions.status) {
+            writable.write(getErrorMarkup(error as Error));
+          }
+
+          log.error(error);
+        },
+      });
+    } catch (error: unknown) {
+      log.error(error);
+
+      return new Response(
+        template + (dev ? getErrorMarkup(error as Error) : ''),
+        {
+          status: 500,
+          headers: {[CONTENT_TYPE]: HTML_CONTENT_TYPE},
+        }
+      );
+    }
+
+    if (response.canStream()) log.trace('worker ready to stream');
+    ssrReadable.allReady.then(() => log.trace('worker complete ssr'));
+
+    const prepareForStreaming = () => {
+      Object.assign(responseOptions, getResponseOptions(response, didError()));
+
+      if (responseOptions.status >= 400) {
+        responseOptions.headers.set('cache-control', 'no-store');
+      } else {
+        /**
+         * TODO: This assumes `response.cache()` has been called _before_ any
+         * queries which might be caught behind Suspense. Clarify this or add
+         * additional checks downstream?
+         */
+        /**
+         * TODO: Also add `Vary` headers for `accept-language` and any other keys
+         * we want to shard our full-page cache for all Hydrogen storefronts.
+         */
+        responseOptions.headers.set(
+          'cache-control',
+          response.cacheControlHeader
+        );
+      }
+
+      if (isRedirect(responseOptions)) {
+        return false;
+      }
+
+      responseOptions.headers.set(CONTENT_TYPE, HTML_CONTENT_TYPE);
+      writable.write(encoder.encode(DOCTYPE));
+
+      const error = didError();
+      if (error) {
+        // This error was delayed until the headers were properly sent.
+        writable.write(encoder.encode(dev ? getErrorMarkup(error) : template));
+      }
+
+      return true;
+    };
+
+    const shouldFlushBody = response.canStream()
+      ? prepareForStreaming()
+      : await ssrReadable.allReady.then(prepareForStreaming);
+
+    if (shouldFlushBody) {
+      let bufferedSsr = '';
+      let isPendingSsrWrite = false;
+
+      const writingSSR = bufferReadableStream(
+        ssrReadable.getReader(),
+        response.canStream()
+          ? (chunk) => {
+              bufferedSsr += chunk;
+
+              if (!isPendingSsrWrite) {
+                isPendingSsrWrite = true;
+                setTimeout(() => {
+                  isPendingSsrWrite = false;
+                  // React can write fractional chunks synchronously.
+                  // This timeout ensures we only write full HTML tags
+                  // in order to allow RSC writing concurrently.
+                  if (bufferedSsr) {
+                    writable.write(encoder.encode(bufferedSsr));
+                    bufferedSsr = '';
+                  }
+                }, 0);
+              }
+            }
+          : undefined
+      );
+
+      const writingRSC = bufferReadableStream(
+        rscReadable.getReader(),
+        response.canStream()
+          ? (scriptTag) => writable.write(encoder.encode(scriptTag))
+          : undefined
+      );
+
+      Promise.all([writingSSR, writingRSC]).then(([ssrHtml, rscPayload]) => {
+        if (!response.canStream()) {
+          const html = assembleHtml({ssrHtml, rscPayload, request, template});
+          writable.write(encoder.encode(html));
+        }
+
+        // Last SSR write might be pending, delay closing the writable one tick
+        setTimeout(() => {
+          writable.close();
+          postRequestTasks(
+            'str',
+            responseOptions.status,
+            request,
+            response,
+            !!didError()
+          );
+          response.status = responseOptions.status;
+          cacheResponse(response, request, savedChunks, revalidate);
+        }, 0);
+      });
+    } else {
+      // Redirects do not write body
+      writable.close();
+      postRequestTasks(
+        'str',
+        responseOptions.status,
+        request,
+        response,
+        !!didError()
+      );
+    }
+
+    if (response.canStream()) {
+      return new Response(transform.readable, responseOptions);
+    }
+
+    const bufferedBody = await bufferReadableStream(
+      transform.readable.getReader()
+    );
+
+    return new Response(bufferedBody, responseOptions);
+  } else if (nodeResponse) {
+    const savedChunks = tagOnWrite(nodeResponse);
+
+    nodeResponse.on('finish', () => {
+      response.status = nodeResponse.statusCode;
+      cacheResponse(response, request, savedChunks, revalidate);
+    });
+
+    const {pipe} = ssrRenderToPipeableStream(AppSSR, {
+      nonce,
+      bootstrapScripts,
+      bootstrapModules,
+      onShellReady() {
+        log.trace('node ready to stream');
+
+        /**
+         * TODO: This assumes `response.cache()` has been called _before_ any
+         * queries which might be caught behind Suspense. Clarify this or add
+         * additional checks downstream?
+         */
+        writeHeadToNodeResponse(nodeResponse, response, log, didError());
+
+        if (isRedirect(nodeResponse)) {
+          // Return redirects early without further rendering/streaming
+          return nodeResponse.end();
+        }
+
+        if (!response.canStream()) return;
+
+        startWritingToNodeResponse(nodeResponse, dev ? didError() : undefined);
+
+        setTimeout(() => {
+          log.trace('node pipe response');
+          if (!nodeResponse.writableEnded) pipe(nodeResponse);
+        }, 0);
+
+        bufferReadableStream(rscReadable.getReader(), (chunk) => {
+          log.trace('rsc chunk');
+          if (!nodeResponse.writableEnded) nodeResponse.write(chunk);
+        });
+      },
+      async onAllReady() {
+        log.trace('node complete ssr');
+
+        if (
+          !revalidate &&
+          (response.canStream() || nodeResponse.writableEnded)
+        ) {
+          postRequestTasks(
+            'str',
+            nodeResponse.statusCode,
+            request,
+            response,
+            !!didError()
+          );
+          return;
+        }
+
+        writeHeadToNodeResponse(nodeResponse, response, log, didError());
+
+        if (isRedirect(nodeResponse)) {
+          // Redirects found after any async code
+          return nodeResponse.end();
+        }
+
+        const bufferedResponse = new PassThrough();
+        const bufferedRscPromise = bufferReadableStream(
+          rscReadable.getReader()
+        );
+
+        let ssrHtml = '';
+        bufferedResponse.on('data', (chunk) => (ssrHtml += chunk.toString()));
+        bufferedResponse.once('error', (error) => (ssrDidError = error));
+        bufferedResponse.once('end', async () => {
+          const rscPayload = await bufferedRscPromise;
+
+          const error = didError();
+          startWritingToNodeResponse(nodeResponse, dev ? error : undefined);
+
+          let html = template;
+
+          if (!error) {
+            html = assembleHtml({ssrHtml, rscPayload, request, template});
+          }
+
+          postRequestTasks(
+            'ssr',
+            nodeResponse.statusCode,
+            request,
+            response,
+            !!didError()
+          );
+
+          if (!nodeResponse.writableEnded) {
+            nodeResponse.write(html);
+            nodeResponse.end();
+          }
+        });
+
+        pipe(bufferedResponse);
+      },
+      onShellError(error: any) {
+        log.error(error);
+
+        if (!nodeResponse.writableEnded) {
+          writeHeadToNodeResponse(nodeResponse, response, log, error);
+          startWritingToNodeResponse(nodeResponse, dev ? error : undefined);
+
+          nodeResponse.write(template);
+          nodeResponse.end();
+        }
+      },
+      onError(error: any) {
+        if (error.message?.includes('stream closed early')) {
+          // This seems to happen when Fizz is still streaming
+          // but nodeResponse has been closed by the browser.
+          // This is common in tests and during development
+          // due to frequent page refresh.
+          return;
+        }
+
+        ssrDidError = error;
+
+        if (dev && nodeResponse.headersSent && !nodeResponse.writableEnded) {
+          // Calling write would flush headers automatically.
+          // Delay this error until headers are properly sent.
+          nodeResponse.write(getErrorMarkup(error));
+        }
+
+        log.error(error);
+      },
+    });
+  }
+}
+
+/**
+ * Run the RSC/Flight part of the App
+ */
+function runRSC({App, state, log, request, response}: RunRscParams) {
+  const serverProps = {...state, request, response, log};
+  request.ctx.router.serverProps = serverProps;
+  preloadRequestCacheData(request);
+
+  const AppRSC = (
+    <ServerRequestProvider request={request}>
+      <App {...serverProps} />
+      <Suspense fallback={null}>
+        <Analytics />
+      </Suspense>
+      {request.ctx.hydrogenConfig?.__EXPERIMENTAL__devTools && (
+        <Suspense fallback={null}>
+          <DevTools />
+        </Suspense>
+      )}
+    </ServerRequestProvider>
+  );
+
+  let rscDidError: Error;
+  const rscReadable = rscRenderToReadableStream(AppRSC, {
+    onError(e) {
+      rscDidError = e;
+      log.error(e);
+    },
+  });
+
+  return {readable: rscReadable, didError: () => rscDidError};
 }
 
 export default renderHydrogen;
 
-function startWritingHtmlToServerResponse(
-  response: ServerResponse,
-  startWriting: () => void,
+function startWritingToNodeResponse(
+  nodeResponse: ServerResponse,
   error?: Error
 ) {
-  if (!response.headersSent) {
-    response.setHeader('Content-type', 'text/html');
-    response.write('<!DOCTYPE html>');
-  }
+  if (nodeResponse.writableEnded) return;
 
-  startWriting();
+  if (!nodeResponse.headersSent) {
+    nodeResponse.setHeader(CONTENT_TYPE, HTML_CONTENT_TYPE);
+    nodeResponse.write(DOCTYPE);
+  }
 
   if (error) {
     // This error was delayed until the headers were properly sent.
-    response.write(getErrorMarkup(error));
+    nodeResponse.write(getErrorMarkup(error));
   }
 }
 
-function writeHeadToServerResponse(
-  response: ServerResponse,
-  {headers, status, customStatus}: ServerComponentResponse,
+type ResponseOptions = {
+  headers: Headers;
+  status: number;
+  statusText?: string;
+};
+
+function getResponseOptions(
+  {headers, status, statusText}: HydrogenResponse,
   error?: Error
 ) {
-  if (response.headersSent) return;
+  const responseInit = {
+    headers,
+    status: error ? 500 : status,
+  } as ResponseOptions;
 
-  headers.forEach((value, key) => response.setHeader(key, value));
+  if (!error && statusText) {
+    responseInit.statusText = statusText;
+  }
 
-  if (error) {
-    response.statusCode = 500;
+  return responseInit;
+}
+
+function writeHeadToNodeResponse(
+  nodeResponse: ServerResponse,
+  componentResponse: HydrogenResponse,
+  log: Logger,
+  error?: Error
+) {
+  if (nodeResponse.headersSent) return;
+  log.trace('writeHeadToNodeResponse');
+
+  const {headers, status, statusText} = getResponseOptions(
+    componentResponse,
+    error
+  );
+
+  if (status >= 400) {
+    nodeResponse.setHeader('cache-control', 'no-store');
   } else {
-    response.statusCode = customStatus?.code ?? status ?? 200;
+    /**
+     * TODO: Also add `Vary` headers for `accept-language` and any other keys
+     * we want to shard our full-page cache for all Hydrogen storefronts.
+     */
+    nodeResponse.setHeader(
+      'cache-control',
+      componentResponse.cacheControlHeader
+    );
+  }
 
-    if (customStatus?.text) {
-      response.statusMessage = customStatus.text;
+  nodeResponse.statusCode = status;
+
+  if (statusText) {
+    nodeResponse.statusMessage = statusText;
+  }
+
+  setNodeHeaders(headers, nodeResponse);
+}
+
+function isRedirect(response: {status?: number; statusCode?: number}) {
+  const status = response.status ?? response.statusCode ?? 0;
+  return status >= 300 && status < 400;
+}
+
+function flightContainer(chunk: string) {
+  return `<meta data-flight="${htmlEncode(chunk)}" />`;
+}
+
+function postRequestTasks(
+  type: RenderType,
+  status: number,
+  request: HydrogenRequest,
+  response: HydrogenResponse,
+  didError: boolean
+) {
+  logServerResponse(type, request, status, didError);
+  logCacheControlHeaders(type, request, response);
+  logQueryTimings(type, request);
+  request.savePreloadQueries();
+}
+
+/**
+ * Ensure Node.js environments handle the fetch Response correctly.
+ */
+function handleFetchResponseInNode(
+  fetchResponsePromise: Promise<Response | undefined>,
+  nodeResponse?: ServerResponse
+) {
+  if (nodeResponse) {
+    fetchResponsePromise.then((response) => {
+      if (!response || nodeResponse.writableEnded) return;
+
+      setNodeHeaders(response.headers, nodeResponse);
+
+      nodeResponse.statusCode = response.status;
+
+      if (response.body) {
+        if (response.body instanceof ReadableStream) {
+          bufferReadableStream(response.body.getReader(), (chunk) => {
+            nodeResponse.write(chunk);
+          }).then(() => nodeResponse.end());
+        } else {
+          nodeResponse.write(response.body);
+          nodeResponse.end();
+        }
+      } else {
+        nodeResponse.end();
+      }
+    });
+  }
+
+  return fetchResponsePromise;
+}
+
+/**
+ * Convert Headers to outgoing Node.js headers.
+ * Specifically, parse set-cookie headers to split them properly as separate
+ * `set-cookie` headers rather than a single, combined header.
+ */
+function setNodeHeaders(headers: Headers, nodeResponse: ServerResponse) {
+  for (const [key, value] of headers.entries()) {
+    if (key.toLowerCase() === 'set-cookie') {
+      nodeResponse.setHeader(key, splitCookiesString(value));
+    } else {
+      nodeResponse.setHeader(key, value);
     }
   }
 }
 
-function isRedirect(response: ServerResponse) {
-  return response.statusCode >= 300 && response.statusCode < 400;
+function tagOnWrite(
+  response: ServerResponse | WritableStreamDefaultWriter<any>
+) {
+  const originalWrite = response.write;
+  const decoder = new TextDecoder();
+  const savedChunks: string[] = [];
+
+  response.write = (arg: any) => {
+    if (arg instanceof Uint8Array) {
+      savedChunks.push(decoder.decode(arg, {stream: true}));
+    } else {
+      savedChunks.push(arg);
+    }
+    // @ts-ignore
+    return originalWrite.apply(response, [arg]);
+  };
+
+  return savedChunks;
+}
+
+async function cacheResponse(
+  response: HydrogenResponse,
+  request: HydrogenRequest,
+  chunks: string[],
+  revalidate?: Boolean
+) {
+  const cache = getCache();
+
+  /**
+   * Only full page cache on cachable responses where response
+   *
+   * - have content to cache
+   * - have status 200
+   * - does not have no-store on cache-control header
+   * - does not have set-cookie header
+   * - is a GET request
+   * - does not have a session or does not have an active customer access token
+   */
+  if (
+    cache &&
+    chunks.length > 0 &&
+    response.status === 200 &&
+    response.cache().mode !== NO_STORE &&
+    !response.headers.has('Set-Cookie') &&
+    /get/i.test(request.method) &&
+    !sessionHasCustomerAccessToken(request)
+  ) {
+    if (revalidate) {
+      await saveCacheResponse(response, request, chunks);
+    } else {
+      const cachePutPromise = Promise.resolve(true).then(() =>
+        saveCacheResponse(response, request, chunks)
+      );
+      request.ctx.runtime?.waitUntil?.(cachePutPromise);
+    }
+  }
+}
+
+function sessionHasCustomerAccessToken(request: HydrogenRequest) {
+  const session = request.ctx.session;
+  // Need to wrap this in a try catch because session.get can
+  // throw a promise if it is not ready
+  try {
+    const sessionData = session?.get();
+    return sessionData && sessionData['customerAccessToken'];
+  } catch (error) {
+    return false;
+  }
+}
+
+async function saveCacheResponse(
+  response: HydrogenResponse,
+  request: HydrogenRequest,
+  chunks: string[]
+) {
+  const cache = getCache();
+
+  if (cache && chunks.length > 0) {
+    const {headers, status, statusText} = getResponseOptions(response);
+
+    headers.set('cache-control', response.cacheControlHeader);
+    const currentHeader = headers.get('Content-Type');
+    if (!currentHeader && !request.isRscRequest()) {
+      headers.set('Content-Type', HTML_CONTENT_TYPE);
+    }
+
+    await setItemInCache(
+      request.cacheKey(),
+      new Response(chunks.join(''), {
+        status,
+        statusText,
+        headers,
+      }),
+      response.cache()
+    );
+    deleteItemFromCache(request.cacheKey(true));
+  }
 }

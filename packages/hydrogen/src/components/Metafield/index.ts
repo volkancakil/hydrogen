@@ -1,3 +1,2 @@
-export {Metafield, MetafieldFragment} from './Metafield.client';
-export {MetafieldType} from './types';
-export {MetafieldFragmentFragment} from './MetafieldFragment';
+export {Metafield} from './Metafield.client.js';
+export type {MetafieldType} from './types.js';

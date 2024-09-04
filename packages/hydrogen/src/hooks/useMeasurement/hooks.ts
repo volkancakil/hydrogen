@@ -1,7 +1,10 @@
 import {useMemo} from 'react';
-import {useShop} from '../../foundation';
-import {getMeasurementAsParts, getMeasurementAsString} from '../../utilities';
-import {Measurement} from '../../types';
+import {useLocalization} from '../useLocalization/useLocalization.js';
+import {
+  getMeasurementAsParts,
+  getMeasurementAsString,
+} from '../../utilities/index.js';
+import {Measurement} from '../../types.js';
 
 export interface UseMeasurementValue {
   localizedString: string;
@@ -15,7 +18,7 @@ export function useMeasurement(
   measurement: Measurement,
   options: Omit<Intl.NumberFormatOptions, 'unit'> = {}
 ): UseMeasurementValue {
-  const {locale} = useShop();
+  const {locale} = useLocalization();
 
   return useMemo(() => {
     return {

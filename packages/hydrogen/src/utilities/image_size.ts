@@ -1,24 +1,9 @@
-import * as React from 'react';
-import {Image as ImageType} from '../graphql/types/types';
-
-export type Width = string | 'original';
-export type Height = string | 'original';
-export type Crop = 'top' | 'bottom' | 'left' | 'right' | 'center';
-export type Scale = 2 | 3;
-export type Format = 'jpg' | 'pjpg';
-
-export interface ImageSizeOptions {
-  width?: Width;
-  height?: Height;
-  crop?: Crop;
-  scale?: Scale;
-  format?: Format;
-}
-
-export interface ImageLoaderOptions {
-  src: string;
-  options?: {[key: string]: any};
-}
+import type {Image as ImageType} from '../storefront-api-types.js';
+import type {PartialDeep} from 'type-fest';
+import type {
+  ShopifyLoaderOptions,
+  ShopifyLoaderParams,
+} from '../components/Image';
 
 // TODO: Are there other CDNs missing from here?
 const PRODUCTION_CDN_HOSTNAMES = [
@@ -27,100 +12,147 @@ const PRODUCTION_CDN_HOSTNAMES = [
   'shopify-assets.shopifycdn.com',
   'shopify-assets.shopifycdn.net',
 ];
-
 const LOCAL_CDN_HOSTNAMES = ['spin.dev'];
+const ALL_CDN_HOSTNAMES = [...PRODUCTION_CDN_HOSTNAMES, ...LOCAL_CDN_HOSTNAMES];
+
+// based on the default width sizes used by the Shopify liquid HTML tag img_tag plus a 2560 width to account for 2k resolutions
+// reference: https://shopify.dev/api/liquid/filters/html-filters#image_tag
+export const IMG_SRC_SET_SIZES = [352, 832, 1200, 1920, 2560];
 
 /**
  * Adds image size parameters to an image URL hosted by Shopify's CDN
  */
-export function addImageSizeParametersToUrl(
-  url: string,
-  {width, height, crop, scale, format}: ImageSizeOptions
-) {
-  const newUrl = new URL(url);
-  const sizePath = width || height ? `_${width ?? ''}x${height ?? ''}` : '';
-  const cropPath = crop ? `_crop_${crop}` : '';
-  const scalePath = scale ? `@${scale}x` : '';
-  const progressive = format === 'pjpg' ? `.progressive` : '';
-  const asJPG = format === 'jpg' ? `.jpg` : '';
+export function addImageSizeParametersToUrl({
+  src,
+  width,
+  height,
+  crop,
+  scale,
+}: ShopifyLoaderParams) {
+  const newUrl = new URL(src);
 
-  // We assume here that the last `.` is the delimiter
-  // between the file name and the file type
-  const fileDelimiterIndex = newUrl.pathname.lastIndexOf('.');
-  const fileName = newUrl.pathname.substr(0, fileDelimiterIndex);
-  const fileType = newUrl.pathname.substr(fileDelimiterIndex);
-  newUrl.pathname = `${fileName}${sizePath}${cropPath}${scalePath}${progressive}${fileType}${asJPG}`;
+  const multipliedScale = scale ?? 1;
+
+  if (width) {
+    let finalWidth: string;
+
+    if (typeof width === 'string') {
+      finalWidth = (IMG_SRC_SET_SIZES[0] * multipliedScale).toString();
+    } else {
+      finalWidth = (Number(width) * multipliedScale).toString();
+    }
+
+    newUrl.searchParams.append('width', finalWidth);
+  }
+
+  if (height && typeof height === 'number') {
+    newUrl.searchParams.append('height', (height * multipliedScale).toString());
+  }
+
+  crop && newUrl.searchParams.append('crop', crop);
+
+  // for now we intentionally leave off the scale param, and instead multiple width & height by scale instead
+  // scale && newUrl.searchParams.append('scale', scale.toString());
 
   return newUrl.toString();
 }
 
-export function shopifyImageLoader({src, options}: ImageLoaderOptions) {
-  const newSrc = new URL(src);
-  const allowedCDNHostnames =
-    PRODUCTION_CDN_HOSTNAMES.concat(LOCAL_CDN_HOSTNAMES);
-  const isShopifyServedImage = allowedCDNHostnames.some((allowedHostname) =>
+export function shopifyImageLoader(params: ShopifyLoaderParams) {
+  const newSrc = new URL(params.src);
+  const isShopifyServedImage = ALL_CDN_HOSTNAMES.some((allowedHostname) =>
     newSrc.hostname.endsWith(allowedHostname)
   );
 
   if (
     !isShopifyServedImage ||
-    options == null ||
-    (!options.width &&
-      !options.height &&
-      !options.crop &&
-      !options.scale &&
-      !options.format)
+    (!params.width && !params.height && !params.crop && !params.scale)
   ) {
-    return src;
+    return params.src;
   }
 
-  return addImageSizeParametersToUrl(src, options);
+  return addImageSizeParametersToUrl(params);
 }
 
-export function useImageUrl(src?: string, options?: ImageSizeOptions) {
-  return React.useMemo(() => {
-    return src ? shopifyImageLoader({src, options}) : src;
-  }, [options, src]);
-}
+type HtmlImageProps = React.ImgHTMLAttributes<HTMLImageElement>;
 
-export function getShopifyImageDimensions(
-  image: Pick<ImageType, 'altText' | 'url' | 'id' | 'width' | 'height'>,
-  options?: ImageSizeOptions
-) {
-  // Storefront API could return null dimension values for images that are not hosted on Shopify CDN
-  // The API dimensions references the image's intrinstic/natural dimensions and provides image aspect ratio information
-  const apiWidth = image.width;
-  const apiHeight = image.height;
+export type GetShopifyImageDimensionsProps = {
+  data: Pick<
+    PartialDeep<ImageType>,
+    'altText' | 'url' | 'id' | 'width' | 'height'
+  >;
+  loaderOptions?: ShopifyLoaderOptions;
+  elementProps?: {
+    width?: HtmlImageProps['width'];
+    height?: HtmlImageProps['height'];
+  };
+};
 
-  if (apiWidth && apiHeight && (options?.width || options?.height)) {
-    const optionWidth = options?.width
-      ? parseInt(options.width, 10)
-      : undefined;
-    const optionHeight = options?.height
-      ? parseInt(options.height, 10)
-      : undefined;
+type GetShopifyImageDimensionsPropsReturn = {
+  width: number | string | null;
+  height: number | string | null;
+};
 
-    // Use option defined width & height
-    if (optionWidth && optionHeight) {
-      return {width: optionWidth, height: optionHeight};
-    }
+/**
+ * Width and height are determined using the followiing priority list:
+ * 1. `loaderOptions`'s width/height
+ * 2. `elementProps`'s width/height
+ * 3. `data`'s width/height
+ *
+ * If only one of `width` or `height` are defined, then the other will attempt to be calculated based on the Image's aspect ratio,
+ * provided that both `data.width` and `data.height` are available. If not, then the aspect ratio cannot be determined and the missing
+ * value will reamin as `null`
+ */
+export function getShopifyImageDimensions({
+  data: sfapiImage,
+  loaderOptions,
+  elementProps,
+}: GetShopifyImageDimensionsProps): GetShopifyImageDimensionsPropsReturn {
+  let aspectRatio: number | null = null;
 
-    // Calculate width from aspect ratio
-    if (!optionWidth && optionHeight) {
-      return {
-        width: Math.round((apiWidth / apiHeight) * optionHeight),
-        height: optionHeight,
-      };
-    }
-
-    // Calculate height from aspect ratio
-    if (optionWidth && !optionHeight) {
-      return {
-        width: optionWidth,
-        height: Math.round((apiHeight / apiWidth) * optionWidth),
-      };
-    }
+  if (sfapiImage?.width && sfapiImage?.height) {
+    aspectRatio = sfapiImage?.width / sfapiImage?.height;
   }
 
-  return {width: apiWidth, height: apiHeight};
+  //  * 1. `loaderOptions`'s width/height
+  if (loaderOptions?.width || loaderOptions?.height) {
+    return {
+      width:
+        loaderOptions?.width ??
+        (aspectRatio && typeof loaderOptions.height === 'number'
+          ? Math.round(aspectRatio * loaderOptions.height)
+          : null),
+      height:
+        loaderOptions?.height ??
+        (aspectRatio && typeof loaderOptions.width === 'number'
+          ? Math.round(aspectRatio * loaderOptions.width)
+          : null),
+    };
+  }
+
+  //  * 2. `elementProps`'s width/height
+  if (elementProps?.width || elementProps?.height) {
+    return {
+      width:
+        elementProps?.width ??
+        (aspectRatio && typeof elementProps.height === 'number'
+          ? Math.round(aspectRatio * elementProps.height)
+          : null),
+      height:
+        elementProps?.height ??
+        (aspectRatio && typeof elementProps.width === 'number'
+          ? Math.round(aspectRatio * elementProps.width)
+          : null),
+    };
+  }
+
+  //  * 3. `data`'s width/height
+  if (sfapiImage?.width || sfapiImage?.height) {
+    return {
+      // can't calculate the aspect ratio here
+      width: sfapiImage?.width ?? null,
+      height: sfapiImage?.height ?? null,
+    };
+  }
+
+  return {width: null, height: null};
 }

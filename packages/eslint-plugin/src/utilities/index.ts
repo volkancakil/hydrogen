@@ -2,7 +2,9 @@ import {parse, join} from 'path';
 import {ESLintUtils} from '@typescript-eslint/experimental-utils';
 
 export * from './react';
+export * from './ast';
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const PACKAGE_JSON = require('../../package.json');
 const REPO = getRepoFromPackageJson(PACKAGE_JSON);
 
@@ -21,7 +23,7 @@ export const deepCopy = <T>(obj: T): T => {
   if (typeof obj === 'object') {
     const copyArray = (arr: any[]): any => arr.map((val) => deepCopy(val));
     if (obj instanceof Array) return copyArray(obj);
-    const newObj = {} as T;
+    const newObj = {} as unknown as T;
     for (const key in obj) {
       const val = obj[key];
       if (val instanceof Array) {
@@ -51,7 +53,7 @@ export function merge<
   T extends object,
   R extends F & T = F & T
 >(from: F, to: T): R {
-  const mergedInto = deepCopy(to) as R;
+  const mergedInto = deepCopy(to) as unknown as R;
   for (const key in from) {
     const curKey = key as unknown as keyof R;
     const hasKey = mergedInto.hasOwnProperty(key);
@@ -65,7 +67,7 @@ export function merge<
       if (!hasKey || !(typeof mergedInto[curKey] === 'object'))
         mergedInto[curKey] = {} as unknown as R[typeof curKey];
 
-      Object.assign(mergedInto[curKey], fromVal);
+      Object.assign(mergedInto[curKey] as any, fromVal);
     } else {
       mergedInto[curKey] = fromVal as unknown as R[typeof curKey];
     }

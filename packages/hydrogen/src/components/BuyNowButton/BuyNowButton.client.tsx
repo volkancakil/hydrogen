@@ -1,9 +1,8 @@
-import React, {useEffect, ElementType, useState, useCallback} from 'react';
-import type {ReactNode} from 'react';
-import {useInstantCheckout} from '../CartProvider';
-import {Props} from '../types';
+import React, {useEffect, useState, useCallback} from 'react';
+import {useInstantCheckout} from '../CartProvider/index.js';
+import {BaseButton, BaseButtonProps} from '../BaseButton/index.js';
 
-export interface BuyNowButtonProps {
+interface BuyNowButtonProps {
   /** The item quantity. Defaults to 1. */
   quantity?: number;
   /** The ID of the variant. */
@@ -13,21 +12,23 @@ export interface BuyNowButtonProps {
     key: string;
     value: string;
   }[];
-  /** Any `ReactNode` elements. */
-  children: ReactNode;
 }
 
-export type BuyNowButtonPropsWeControl = 'onClick';
-
 /** The `BuyNowButton` component renders a button that adds an item to the cart and redirects the customer to checkout. */
-export function BuyNowButton<TTag extends ElementType = 'button'>(
-  props: Props<TTag, BuyNowButtonPropsWeControl> & BuyNowButtonProps
+export function BuyNowButton<AsType extends React.ElementType = 'button'>(
+  props: BuyNowButtonProps & BaseButtonProps<AsType>
 ) {
   const {createInstantCheckout, checkoutUrl} = useInstantCheckout();
   const [loading, setLoading] = useState<boolean>(false);
 
-  const {quantity, variantId, attributes, children, ...passthroughProps} =
-    props;
+  const {
+    quantity,
+    variantId,
+    onClick,
+    attributes,
+    children,
+    ...passthroughProps
+  } = props;
 
   useEffect(() => {
     if (checkoutUrl) {
@@ -46,15 +47,16 @@ export function BuyNowButton<TTag extends ElementType = 'button'>(
         },
       ],
     });
-  }, [setLoading, createInstantCheckout, quantity, variantId, attributes]);
+  }, [createInstantCheckout, quantity, variantId, attributes]);
 
   return (
-    <button
+    <BaseButton
       disabled={loading ?? passthroughProps.disabled}
       {...passthroughProps}
-      onClick={handleBuyNow}
+      onClick={onClick}
+      defaultOnClick={handleBuyNow}
     >
       {children}
-    </button>
+    </BaseButton>
   );
 }

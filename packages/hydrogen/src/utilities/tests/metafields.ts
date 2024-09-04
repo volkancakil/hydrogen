@@ -1,7 +1,6 @@
-// eslint-disable-next-line node/no-extraneous-import
 import faker from 'faker';
-import {Metafield} from '../../graphql/types/types';
-import {ParsedMetafield, Rating, RawMetafield} from '../../types';
+import type {Metafield} from '../../storefront-api-types.js';
+import type {PartialDeep} from 'type-fest';
 
 export type MetafieldType =
   | 'single_line_text_field'
@@ -45,8 +44,10 @@ export const METAFIELDS: MetafieldType[] = [
 ];
 
 export function getRawMetafield(
-  metafield: Partial<Metafield> & {type?: MetafieldType} = {}
-): RawMetafield {
+  metafield: PartialDeep<Metafield> & {
+    type?: MetafieldType;
+  } = {}
+): PartialDeep<Metafield> {
   const type: MetafieldType =
     metafield.type == null
       ? faker.random.arrayElement(METAFIELDS)
@@ -54,13 +55,13 @@ export function getRawMetafield(
 
   return {
     __typename: 'Metafield',
-    createdAt: metafield.createdAt ?? faker.date.recent(),
+    createdAt: metafield.createdAt ?? faker.date.recent().toString(),
     description: metafield.description ?? faker.random.words(),
     id: metafield.id ?? faker.random.words(),
     key: metafield.key ?? `${faker.random.word()}.${faker.random.word()}`,
     namespace: metafield.namespace ?? faker.random.word(),
     type,
-    updatedAt: metafield.updatedAt ?? faker.date.recent(),
+    updatedAt: metafield.updatedAt ?? faker.date.recent().toString(),
     value: metafield.value ?? getMetafieldValue(type),
     reference: metafield.reference,
   };
@@ -120,62 +121,16 @@ export function getMetafieldValue(type: MetafieldType) {
         value: faker.datatype.number(),
         unit: faker.random.arrayElement(['mm', 'cm', 'm', 'in', 'ft', 'yd']),
       });
-    case 'rating':
+    case 'rating': {
       const max = faker.datatype.number({min: 5, max: 10});
       const min = faker.datatype.number({min: 1, max: 4});
       return JSON.stringify({
         scale_max: max,
         scale_min: min,
-        value: faker.datatype.float({min, max}),
+        value: faker.datatype.float({min, max, precision: 0.0001}),
       });
+    }
     default:
       return JSON.stringify(faker.datatype.json());
   }
-}
-
-export function getParsedMetafield(
-  metafield: Partial<Metafield> & {type?: MetafieldType} = {}
-) {
-  const rawField: RawMetafield = getRawMetafield(metafield);
-  const field: ParsedMetafield = {...rawField, value: undefined};
-
-  if (rawField.value == null) {
-    return field;
-  }
-
-  switch (field.type) {
-    case 'boolean':
-      field.value = rawField.value == 'true';
-      break;
-    case 'number_integer':
-      field.value = parseInt(rawField.value);
-      break;
-    case 'number_decimal':
-      field.value = parseFloat(rawField.value);
-      break;
-    case 'date':
-    case 'date_time':
-      field.value = new Date(rawField.value);
-      break;
-    case 'json':
-    case 'weight':
-    case 'dimension':
-    case 'volume':
-    case 'rating':
-      field.value = JSON.parse(rawField.value) as Rating;
-      break;
-    case 'color':
-    case 'single_line_text_field':
-    case 'multi_line_text_field':
-    case 'product_reference':
-    case 'page_reference':
-    case 'variant_reference':
-    case 'file_reference':
-    case 'url':
-    default:
-      field.value = rawField.value;
-      break;
-  }
-
-  return field;
 }
